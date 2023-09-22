@@ -1,21 +1,23 @@
-using Microsoft.EntityFrameworkCore;
-
 namespace PostgreSQLevel1;
 
 public class AppContext : DbContext
 {
-    public AppContext(DbContextOptions<AppContext> options) : base(options)
+    private readonly bool _usesCitext;
+
+    public AppContext(DbContextOptions<AppContext> options, bool usesCitext) : base(options)
     {
+        _usesCitext = usesCitext;
     }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
-        modelBuilder.Entity<Address>().HasKey(e => e.Id);
-        modelBuilder.Entity<Address>().Property(e => e.City).HasColumnType("varchar(100)");
-        modelBuilder.Entity<Address>().HasData(
-            new Address { Id = 1, City = "Zürich" },
-            new Address { Id = 2, City = "Neuchatel" }
-        );
+        var addresses = modelBuilder.Entity<Address>().ToTable("addresses");
+        addresses.Property(e => e.Id).HasColumnName("id");
+        var city = addresses.Property(e => e.City).HasColumnName("city");
+        if (_usesCitext)
+        {
+            city.HasColumnType("citext");
+        }
     }
 
     public DbSet<Address> Addresses { get; set; } = null!;
@@ -24,5 +26,5 @@ public class AppContext : DbContext
 public class Address
 {
     public int Id { get; set; }
-    public string? City { get; set; }
+    public string City { get; set; } = "";
 }
