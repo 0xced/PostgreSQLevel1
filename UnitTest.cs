@@ -1,42 +1,104 @@
+using System;
+using System.Collections.Generic;
+using FluentAssertions.Execution;
+
 namespace PostgreSQLevel1;
 
-public abstract class UnitTest : IAsyncLifetime
+public abstract class UnitTest<T> : IDisposable, IClassFixture<T> where T : DatabaseFixture
 {
-    private readonly PostgreSqlContainer _container = new PostgreSqlBuilder().WithImage("postgres:16.0").Build();
-    private readonly ITestOutputHelper _testOutputHelper;
-    private DbContextOptions<AppContext> _options = null!;
+    private readonly DbContextOptions<AppContext> _options;
+    private readonly AssertionScope _assertionScope;
 
-    protected UnitTest(ITestOutputHelper testOutputHelper) => _testOutputHelper = testOutputHelper;
-
-    protected abstract string CreateDatabaseScript { get; }
-
-    async Task IAsyncLifetime.InitializeAsync()
+    protected UnitTest(T dbFixture, ITestOutputHelper testOutputHelper)
     {
-        await _container.StartAsync();
-        await _container.ExecScriptAsync(CreateDatabaseScript);
-        await _container.ExecScriptAsync("""
-        INSERT INTO Addresses (City) VALUES ('Zürich');
-        """);
-        _options = new DbContextOptionsBuilder<AppContext>().UseNpgsql(_container.GetConnectionString())
-            .UseLoggerFactory(LoggerFactory.Create(builder => builder.AddXUnit(_testOutputHelper)))
-            .EnableDetailedErrors()
-            .EnableSensitiveDataLogging()
-            .Options;
+        _options = dbFixture.Options;
+        dbFixture.OutputHelper = testOutputHelper;
+        _assertionScope = new AssertionScope();
+    }
+
+    public void Dispose() => _assertionScope.Dispose();
+
+    public static IEnumerable<object[]> GetQueries()
+    {
+        yield return new object[] { "zürich" };
+        yield return new object[] { "Zürich" };
+        yield return new object[] { "ZÜRICH" };
+        yield return new object[] { "zurich" };
+        yield return new object[] { "Zurich" };
+        yield return new object[] { "ZURICH" };
     }
 
     [Theory]
-    [InlineData("zurich")]
-    [InlineData("Zürich")]
-    [InlineData("ZURICH")]
-    [InlineData("ZÜRICH")]
-    public async Task TestInsensitiveSearch(string city)
+    [MemberData(nameof(GetQueries))]
+    public async Task Address_Contains(string query)
     {
         await using var context = new AppContext(_options, usesCitext: GetType() == typeof(UnitTest_Citext));
 
-        var result = await context.Addresses.Where(e => e.City.Contains(city)).ToListAsync();
+        var result = await context.Suppliers.Where(e => e.Address.Contains(query)).Select(e => e.Address).ToListAsync();
 
-        result.Should().ContainSingle();
+        result.Should().HaveCount(4);
+        result.Should().BeEquivalentTo(new[]
+        {
+            "Bahnhofstrasse 21, 8001 Zürich",
+            "Bahnhofstrasse 21, 8001 ZÜRICH",
+            "Bahnhofstrasse 21, 8001 Zurich",
+            "Bahnhofstrasse 21, 8001 ZURICH",
+        });
     }
 
-    async Task IAsyncLifetime.DisposeAsync() => await _container.DisposeAsync();
+    [Theory]
+    [MemberData(nameof(GetQueries))]
+    public async Task Address_Ilike(string query)
+    {
+        await using var context = new AppContext(_options, usesCitext: GetType() == typeof(UnitTest_Citext));
+
+        var result = await context.Suppliers.Where(e => EF.Functions.ILike(e.Address, query)).Select(e => e.Address).ToListAsync();
+
+        result.Should().HaveCount(4);
+        result.Should().BeEquivalentTo(new[]
+        {
+            "Bahnhofstrasse 21, 8001 Zürich",
+            "Bahnhofstrasse 21, 8001 ZÜRICH",
+            "Bahnhofstrasse 21, 8001 Zurich",
+            "Bahnhofstrasse 21, 8001 ZURICH",
+        });
+    }
+
+    [Theory]
+    [MemberData(nameof(GetQueries))]
+    public async Task City_Equals(string query)
+    {
+        await using var context = new AppContext(_options, usesCitext: GetType() == typeof(UnitTest_Citext));
+
+        var result = await context.Suppliers.Where(e => e.City == query).Select(e => e.Address).ToListAsync();
+
+        result.Should().HaveCount(4);
+        result.Should().BeEquivalentTo(new[]
+        {
+            "Bahnhofstrasse 21, 8001 Zürich",
+            "Bahnhofstrasse 21, 8001 ZÜRICH",
+            "Bahnhofstrasse 21, 8001 Zurich",
+            "Bahnhofstrasse 21, 8001 ZURICH",
+        });
+    }
+
+    [SkippableTheory]
+    [MemberData(nameof(GetQueries))]
+    public async Task City_TrigramsSimilarity(string query)
+    {
+        Skip.IfNot(GetType() == typeof(UnitTest_Trigram), "Trigrams are only supported when the pg_trgm extension is enabled");
+
+        await using var context = new AppContext(_options, usesCitext: GetType() == typeof(UnitTest_Citext));
+
+        var result = await context.Suppliers.Where(e => EF.Functions.TrigramsSimilarity(e.City, query) > 0.3).Select(e => e.Address).ToListAsync();
+
+        result.Should().HaveCount(4);
+        result.Should().BeEquivalentTo(new[]
+        {
+            "Bahnhofstrasse 21, 8001 Zürich",
+            "Bahnhofstrasse 21, 8001 ZÜRICH",
+            "Bahnhofstrasse 21, 8001 Zurich",
+            "Bahnhofstrasse 21, 8001 ZURICH",
+        });
+    }
 }
